@@ -169,6 +169,8 @@ from kiro_crew.platform import (
     safe_context_call,
 )
 from kiro_crew.power import SleepInhibitor
+from kiro_crew.project_capabilities import ProjectCapabilityManager
+from kiro_crew.project_registry import ProjectRegistry
 from kiro_crew.safety_override import (
     apply_config_duration,
     describe_dropped_grant,
@@ -2755,6 +2757,12 @@ def _tailnet_origin_enabled() -> bool:
     return bool(KiroCrewConfig.load().dashboard.tailscale.enabled)
 
 
+def _create_project_services() -> tuple[ProjectRegistry, ProjectCapabilityManager]:
+    """Create the shared Project authority and capability manager off-loop."""
+    registry = ProjectRegistry()
+    return registry, ProjectCapabilityManager(registry)
+
+
 async def start_dashboard(
     sessions: SessionManager,
     crons: CronService,
@@ -3079,6 +3087,9 @@ async def start_dashboard(
     # (pinned by test_streaming_bypasses_the_app_client_max_size). Reading this
     # number as a global request cap is the false invariant to avoid.
     app["state"] = state
+    project_registry, project_capability_manager = await asyncio.to_thread(_create_project_services)
+    app["project_registry"] = project_registry
+    app["project_capability_manager"] = project_capability_manager
     # Bind the serving loop once, here: this runs ON that loop, so every
     # surface that later hands work in from a foreign thread -- slots
     # coalescing, an off-loop websocket send, the log handler's fan-out --
