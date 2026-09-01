@@ -10,6 +10,7 @@ import Modal from '../../components/Modal'
 import PromptForm, { assemblePromptContent, parsePromptContent, type PromptFormData, type PromptScope } from '../../components/PromptForm'
 import InfoTip from '../../components/InfoTip'
 import ListDetailBack from '../../components/ListDetailBack'
+import { useSidePanelLeaveGuard } from '../../components/SidePanelLayout'
 import { parseErrorCode } from '../../utils/errorReport'
 import { useListDetailView } from '../../hooks/useListDetailView'
 import { useProvider } from '../../providers'
@@ -294,6 +295,27 @@ export default function PromptsTab() {
    *  choice, not content, and alone it is not worth an "are you sure". */
   const createDirty = () =>
     !!(createForm.name.trim() || createForm.description.trim() || createForm.body.trim())
+
+  // The host page renders this tab conditionally (`{tab === 'prompts' &&
+  // <PromptsTab />}`), so clicking another tab in the rail UNMOUNTS the pane and
+  // takes the open editor with it. Every in-pane exit already asks before
+  // destroying typed work — the editor's Cancel, the modal's Cancel and X, and
+  // selecting a different row — but the rail click belongs to the shell, so
+  // until it consults this guard it was the one exit that discarded a draft in
+  // silence. Same copy as those confirms, because it is the same question.
+  //
+  // Deliberately `editDirty()` alone, NOT the create form: the create modal
+  // renders a full-viewport backdrop above the rail, so while a create draft is
+  // open no rail tab (and no mobile back bar) can be clicked at all — measured,
+  // not assumed: a capture run driving the rail with the modal open cannot reach
+  // the button, the backdrop takes the click. Adding `createDirty()` here would
+  // guard an unreachable path, and unqualified it would be actively wrong, since
+  // discarding a create leaves `createForm` holding the abandoned text (only
+  // OPENING the modal resets it) and every later tab switch would ask about a
+  // draft the user already threw away. If the modal ever stops covering the
+  // rail, the create form needs this same guard.
+  useSidePanelLeaveGuard(() =>
+    !editDirty() || confirm(i18nT('pages.overview.promptsTab.discard_unsaved_changes')))
 
   const select = (p: Prompt) => {
     // A write in flight owns the panes it is about to update. Switching now
