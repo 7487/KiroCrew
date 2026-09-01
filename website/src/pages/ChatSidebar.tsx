@@ -1342,7 +1342,21 @@ function FolderBody({ open, children }: { open: boolean; children: React.ReactNo
         transition: 'grid-template-rows 0.15s ease-out',
       }}
     >
-      <div style={{ overflow: 'hidden', visibility: open ? 'visible' : 'hidden', padding: open ? `2px 0 2px ${FOLDER_BODY_INSET_PX}px` : 0 }}>{children}</div>
+      <div style={{
+        overflow: 'hidden',
+        visibility: open ? 'visible' : 'hidden',
+        // `overflow: hidden` clips the collapsed rows for PAINT, but it does not
+        // stop them contributing scrollable overflow to the sidebar's scroll
+        // lane: a collapsed folder holding a dormant split measured 2984px of
+        // lane scrollHeight above its clientHeight, so the lane scrolled that
+        // far into pure emptiness (measured on 0.5.0rc7 and on main, identical).
+        // `content-visibility: hidden` skips the subtree's LAYOUT entirely,
+        // which removes that height while keeping the rows MOUNTED — they must
+        // stay in the DOM because sessionRowNav.ts walks them for keyboard
+        // navigation through collapsed folders.
+        contentVisibility: open ? 'visible' : 'hidden',
+        padding: open ? `2px 0 2px ${FOLDER_BODY_INSET_PX}px` : 0,
+      }}>{children}</div>
     </div>
   )
 }
