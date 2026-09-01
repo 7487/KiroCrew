@@ -236,6 +236,7 @@ from kiro_crew.security import (
     oauth_url_contains_credential,
     redact_credentials,
     redact_exfiltration_urls,
+    sanitized_oauth_endpoint,
 )
 from kiro_crew.sel import sel
 from kiro_crew.session import SessionClosingError, SpeculativeResumeRefused
@@ -1554,21 +1555,56 @@ def _emit_mcp_oauth_request(
             "ACP: rejecting MCP OAuth URL with credential/exfil pattern for %s",
             server_name or "(unknown)",
         )
+        # Name the endpoint so case 2 is actionable: without the host+path the
+        # user cannot know what to write into oauth_endpoints.json. The helper
+        # returns host and path ONLY (query/PKCE material is never echoed) and
+        # self-redacts a credential-bearing path, so surfacing it does not
+        # weaken the rejection.
+        endpoint = sanitized_oauth_endpoint(oauth_url)
+        rejected_meta: dict[str, Any] = {
+            "server_name": safe_name,
+            "failed": True,
+            "rejected_url": True,
+            "error": "URL contained credential or exfiltration pattern",
+            "remedy": "oauth_endpoints.json",
+        }
+        endpoint_detail = ""
+        if endpoint is not None:
+            rejected_host, rejected_path = endpoint
+            rejected_meta["rejected_host"] = rejected_host
+            rejected_meta["rejected_path"] = rejected_path
+            # The dashboard's failed-banner renderer (McpOAuthBanner) displays
+            # meta["error"], not the content string — the endpoint must ride in
+            # the error field to actually reach the user's screen.
+            rejected_meta["error"] = (
+                "URL contained credential or exfiltration pattern "
+                f"(endpoint: {rejected_host}{rejected_path})"
+            )
+            # Emit the copy-paste oauth_endpoints.json entry ONLY when it would
+            # validate: a redacted or truncated path is not the real endpoint,
+            # and _load_operator_oauth_endpoints would silently skip it — a
+            # suggestion that no-ops teaches the user the remedy is broken.
+            if rejected_path.startswith("/") and not rejected_path.endswith("…"):
+                rejected_meta["remedy_shape"] = {
+                    "additional_authorization_endpoints": [
+                        {"host": rejected_host, "path": rejected_path}
+                    ]
+                }
+            endpoint_detail = (
+                f" The rejected authorization endpoint was "
+                f"{rejected_host}{rejected_path} (query values withheld)."
+            )
         slot.append(
             "mcp_oauth",
             f"🚫 {label} sent an authentication URL containing a credential "
-            "pattern (rejected). If this is a self-hosted or otherwise "
-            "unlisted identity provider, its authorization endpoint may need "
-            "adding to oauth_endpoints.json in the Kiro Crew data home; "
-            "otherwise ask the server owner to fix the URL.",
+            f"pattern (rejected).{endpoint_detail} If this is a self-hosted "
+            "or otherwise unlisted identity provider, its authorization "
+            "endpoint may need adding to oauth_endpoints.json in the Kiro "
+            'Crew data home, shaped {"additional_authorization_endpoints": '
+            '[{"host": ..., "path": ...}]}; otherwise ask the server owner '
+            "to fix the URL.",
             "msg msg-warn",
-            meta={
-                "server_name": safe_name,
-                "failed": True,
-                "rejected_url": True,
-                "error": "URL contained credential or exfiltration pattern",
-                "remedy": "oauth_endpoints.json",
-            },
+            meta=rejected_meta,
         )
         return
     content = f"🔐 {label} requires authentication."

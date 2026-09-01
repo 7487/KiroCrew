@@ -216,6 +216,82 @@ class TestEmitMcpOAuthRequest:
         assert "oauth_url" not in m["meta"]
         assert "AKIAIOSFODNN7EXAMPLE" not in m["content"]
 
+    def test_rejection_banner_names_the_rejected_endpoint(self):
+        """A rejected URL must name the SANITIZED host+path that tripped the
+        scanner (#7578): without it the user cannot know which endpoint to
+        write into ``oauth_endpoints.json``, so the failure reads as
+        unfixable. Query values carry state/PKCE material (and here, the
+        smuggled credential) and must NEVER be echoed — not in the content,
+        not anywhere in the meta dict.
+        """
+        slot = _ChatSlot("s1")
+        state = MagicMock()
+        _emit_mcp_oauth_request(
+            state,
+            slot,
+            "self-hosted",
+            "https://Unlisted-IdP.example/realms/dev/authorize"
+            "?state=topsecretstatevalue&key=AKIAIOSFODNN7EXAMPLE",
+        )
+        m = slot.messages[0]
+        # Sanitized endpoint in the banner text and the meta.
+        assert "unlisted-idp.example/realms/dev/authorize" in m["content"]
+        assert m["meta"]["rejected_host"] == "unlisted-idp.example"
+        assert m["meta"]["rejected_path"] == "/realms/dev/authorize"
+        # The dashboard's failed banner renders meta["error"], NOT content —
+        # the endpoint must ride there to actually reach the user's screen.
+        assert "unlisted-idp.example/realms/dev/authorize" in m["meta"]["error"]
+        # The exact oauth_endpoints.json entry the operator would add.
+        assert m["meta"]["remedy_shape"] == {
+            "additional_authorization_endpoints": [
+                {"host": "unlisted-idp.example", "path": "/realms/dev/authorize"}
+            ]
+        }
+        # The banner names the expected file shape so the user knows what to write.
+        assert "additional_authorization_endpoints" in m["content"]
+        # Query values never leak into any surfaced field.
+        serialized = json.dumps(m, ensure_ascii=False)
+        assert "AKIAIOSFODNN7EXAMPLE" not in serialized
+        assert "topsecretstatevalue" not in serialized
+
+    def test_redacted_path_gets_no_remedy_shape(self):
+        """A credential-bearing path self-redacts to the shared tag; the tag is
+        not the real endpoint, and _load_operator_oauth_endpoints would skip an
+        entry containing it — so no copy-paste suggestion is emitted."""
+        slot = _ChatSlot("s1")
+        state = MagicMock()
+        token = "ghp_" "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef12"
+        _emit_mcp_oauth_request(
+            state,
+            slot,
+            "self-hosted",
+            f"https://idp.example/{token}/authorize?state=x",
+        )
+        m = slot.messages[0]
+        assert m["meta"]["rejected_host"] == "idp.example"
+        assert m["meta"]["rejected_path"] == "[REDACTED: credential]"
+        assert "remedy_shape" not in m["meta"]
+        assert token not in json.dumps(m, ensure_ascii=False)
+
+    def test_rejection_banner_survives_unparseable_url(self):
+        """A URL that cannot be parsed to a hostname still rejects with the
+        original unnamed banner — no endpoint fields, no crash."""
+        slot = _ChatSlot("s1")
+        state = MagicMock()
+        _emit_mcp_oauth_request(
+            state,
+            slot,
+            "self-hosted",
+            "https://[bad-ipv6/authorize?key=AKIAIOSFODNN7EXAMPLE",
+        )
+        m = slot.messages[0]
+        assert m["meta"]["failed"] is True
+        assert m["meta"]["rejected_url"] is True
+        assert "rejected_host" not in m["meta"]
+        assert "rejected_path" not in m["meta"]
+        assert "remedy_shape" not in m["meta"]
+        assert "AKIAIOSFODNN7EXAMPLE" not in m["content"]
+
     def test_accepts_real_github_oauth_pkce_url(self):
         """Regression: a legitimate GitHub OAuth + PKCE consent URL must be
         rendered, not rejected.  These URLs carry high-entropy params

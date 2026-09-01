@@ -65,7 +65,7 @@ from kiro_crew.config.loader import data_home
 from kiro_crew.loop_lock import LoopBoundLock
 from kiro_crew.mcp_grant import grant_observed
 from kiro_crew.mcp_utils import mcp_server_alias
-from kiro_crew.security import oauth_url_contains_credential
+from kiro_crew.security import oauth_url_contains_credential, sanitized_oauth_endpoint
 from kiro_crew.sel import sel
 from kiro_crew.session_pid import register_protected_pid, unregister_protected_pid
 
@@ -699,8 +699,15 @@ async def start_oauth_mint(
                 break
         if oauth_url and oauth_url_contains_credential(oauth_url):
             # The same predicate the chat consent path applies before surfacing a
-            # banner. The value is never logged or recorded.
-            logger.warning("OAuth mint for %r produced a URL with a credential pattern", slug)
+            # banner. The URL value itself is never logged or recorded — only the
+            # sanitized host+path (never query values), so the operator can tell
+            # WHICH endpoint tripped the scanner and what to allowlist.
+            endpoint = sanitized_oauth_endpoint(oauth_url)
+            logger.warning(
+                "OAuth mint for %r produced a URL with a credential pattern (endpoint: %s)",
+                slug,
+                f"{endpoint[0]}{endpoint[1]}" if endpoint else "unparseable",
+            )
             await _dispose_mint(holdings)
             async with _mints_lock:
                 if _mints.get(slug, {}).get("token") == my_token:
