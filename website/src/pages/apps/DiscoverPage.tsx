@@ -196,13 +196,43 @@ function DiscoverPageBody() {
   // (same mechanism as TrustAppModal / RegistryManager; awaiting them holds
   // the spinner until the refetches settle). allSettled, because one source
   // being unreachable must not stop the refetch from repairing the other.
+  //
+  // The settled results are READ, not discarded: a failed refresh keeps
+  // serving the prior (stale or seed) listing, which looks identical to a
+  // successful one, so the outcome must reach the error banner or the user
+  // cannot tell them apart. A rejected POST reports its own message; a
+  // fulfilled registries response reporting per-source failures names them
+  // (same branch RegistryManager runs on this response shape). Reporting
+  // never skips the invalidations below -- the healthy source still gets its
+  // refetch -- and a fully successful refresh clears the banner so a repaired
+  // source does not wear a stale error.
   const queryClient = useQueryClient()
   const [refreshing, setRefreshing] = useState(false)
   const handleRefresh = async () => {
     if (refreshing) return
     setRefreshing(true)
     try {
-      await Promise.allSettled([api.refreshAppStore(), api.refreshRegistries()])
+      const [storeResult, registriesResult] = await Promise.allSettled([
+        api.refreshAppStore(),
+        api.refreshRegistries(),
+      ])
+      const rejection = [storeResult, registriesResult].find(
+        (r): r is PromiseRejectedResult => r.status === 'rejected',
+      )
+      if (rejection) {
+        setError(rejection.reason instanceof Error && rejection.reason.message
+          ? rejection.reason.message
+          : i18nT('components.registryManager.failed_to_refresh_registries'))
+      } else if (
+        registriesResult.status === 'fulfilled'
+        && registriesResult.value.ok === false
+        && registriesResult.value.failed && registriesResult.value.failed.length > 0
+      ) {
+        setError(i18nT('components.registryManager.could_not_refresh_still_showing_last_synced',
+          { names: registriesResult.value.failed.join(', ') }))
+      } else {
+        setError('')
+      }
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['registry'] }),
         queryClient.invalidateQueries({ queryKey: ['apps'] }),
