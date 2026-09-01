@@ -7010,6 +7010,8 @@
         "form_description_placeholder": "One line shown in the prompt list",
         "form_name": "Name",
         "form_name_hint": "Lowercase letters, digits, and hyphens. Saved as <name>.md.",
+        "form_name_preview": "Lowercase letters, digits, and hyphens. Saved as {{filename}}.",
+        "invalid_name_hint": "A prompt filename can only use lowercase letters, digits, and hyphens, and this name has none of them. Add at least one letter from a to z, or a digit.",
         "form_name_placeholder": "my-prompt-name",
         "form_scope": "Scope",
         "invoke_in_chat": "Invoke in chat:",

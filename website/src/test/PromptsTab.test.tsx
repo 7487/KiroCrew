@@ -117,6 +117,44 @@ describe('PromptsTab authoring', () => {
     expect(create).not.toBeDisabled()
   })
 
+  it('keeps Create disabled for a name the server would sanitize to nothing', async () => {
+    // Katakana, as code-point escapes: the repo forbids CJK literals in source,
+    // and the sanitizer only cares that no character is in [a-z0-9-].
+    const nonLatin = '\u30d7\u30ed\u30f3\u30d7\u30c8'
+    renderTab()
+    fireEvent.click(await screen.findByText('Create New Prompt'))
+    fireEvent.change(screen.getByPlaceholderText(/markdown the agent receives/), { target: { value: 'b' } })
+
+    // Non-empty to `.trim()`, empty to the server's sanitizer, so gating on the
+    // raw name sent a request that could only 400.
+    fireEvent.change(screen.getByPlaceholderText('my-prompt-name'), { target: { value: nonLatin } })
+    expect(screen.getByText('Create')).toBeDisabled()
+    expect(screen.getByText(/has none of them/)).toBeInTheDocument()
+
+    // One character in the allowed set is enough to produce a filename.
+    fireEvent.change(screen.getByPlaceholderText('my-prompt-name'), { target: { value: `${nonLatin}a` } })
+    expect(screen.getByText('Create')).not.toBeDisabled()
+    expect(mockApi.createPrompt).not.toHaveBeenCalled()
+  })
+
+  it('translates a 400 invalid_name instead of echoing the server English', async () => {
+    mockApi.createPrompt.mockRejectedValue(new StubApiError(
+      400,
+      'invalid prompt name',
+      JSON.stringify({ error: 'invalid prompt name', code: 'invalid_name' }),
+    ))
+    renderTab()
+    fireEvent.click(await screen.findByText('Create New Prompt'))
+    // A name the client mirror accepts, so the request is actually sent: the
+    // mapping has to hold for a name the preview and the server disagree on.
+    fireEvent.change(screen.getByPlaceholderText('my-prompt-name'), { target: { value: 'ok-name' } })
+    fireEvent.change(screen.getByPlaceholderText(/markdown the agent receives/), { target: { value: 'b' } })
+    fireEvent.click(screen.getByText('Create'))
+
+    await waitFor(() => expect(screen.getByText(/has none of them/)).toBeInTheDocument())
+    expect(screen.queryByText('invalid prompt name')).not.toBeInTheDocument()
+  })
+
   it('surfaces a failed create instead of closing the dialog', async () => {
     mockApi.createPrompt.mockRejectedValue(new Error("prompt 'p' already exists"))
     renderTab()

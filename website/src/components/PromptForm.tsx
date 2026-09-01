@@ -224,6 +224,39 @@ export function assemblePromptContent(data: PromptFormData): string {
   return ['---', kept, data.closer ?? '---'].join(eol) + eol + sep + data.body
 }
 
+/** The filename stem the server will actually save a new prompt under.
+ *
+ *  Mirrors the create handler's own sanitizer in
+ *  `src/kiro_crew/dashboard/handlers/prompts.py`:
+ *
+ *      safe_name = re.sub(r"[^a-z0-9\-]", "-", raw_name.lower()).strip("-")
+ *
+ *  It is a PREVIEW, not the authority. The two implementations read their own
+ *  Unicode tables for `lower()`, so a rare codepoint could fold differently in
+ *  the browser than on the server, and nothing stops a non-dashboard client
+ *  from posting a name this never saw. That residue is why the 400
+ *  `invalid_name` still needs a translated message of its own — see
+ *  `writeError` in `PromptsTab.tsx` — rather than the client-side check being
+ *  treated as sufficient.
+ *
+ *  Two details that look like omissions and are not:
+ *
+ *  - The `u` flag is load-bearing. Without it the class matches UTF-16 CODE
+ *    UNITS, so one astral character — an emoji, a rare CJK ideograph — becomes
+ *    TWO hyphens where the server writes one, and the preview would disagree
+ *    with the saved name for every name containing one.
+ *  - The handler trims the raw name before sanitizing; that has no mirror here
+ *    because it cannot change the result. Edge whitespace becomes an edge
+ *    hyphen, which the hyphen strip removes anyway, so a `trim()` would only
+ *    add a second place for the two to disagree. */
+export function sanitizePromptName(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/gu, '-')
+    .replace(/^-+/, '')
+    .replace(/-+$/, '')
+}
+
 interface PromptFormProps {
   data: PromptFormData
   onChange: (data: PromptFormData) => void
@@ -238,8 +271,15 @@ export default function PromptForm({ data, onChange, hideIdentity }: PromptFormP
   // mounted at once (create modal + an open inline editor).
   const uid = useId()
   const nameId = `${uid}-name`
+  const nameHintId = `${uid}-name-hint`
   const descId = `${uid}-description`
   const bodyId = `${uid}-body`
+  // What the server will name the file, computed from what is typed so far.
+  // `typed` is separate from `stem` because the two empty cases mean opposite
+  // things: nothing typed yet is not a problem to report, whereas a name that
+  // sanitizes AWAY is the 400 the user is about to earn.
+  const typed = data.name.trim() !== ''
+  const stem = sanitizePromptName(data.name)
   return (
     <div className="flex flex-col gap-3">
       {!hideIdentity && (
@@ -248,8 +288,27 @@ export default function PromptForm({ data, onChange, hideIdentity }: PromptFormP
             {/* label-has-for can't resolve the control through the custom <Input>
                 component; the runtime association via htmlFor + id + aria-label is correct. */}
             <label htmlFor={nameId} className="block text-[12px] text-muted mb-1">{i18nT('pages.overview.promptsTab.form_name')}</label>
-            <Input id={nameId} aria-label={i18nT('pages.overview.promptsTab.form_name')} value={data.name} onChange={e => set({ name: e.target.value })} placeholder={i18nT('pages.overview.promptsTab.form_name_placeholder')} />
-            <p className="text-[11px] text-muted mt-1">{i18nT('pages.overview.promptsTab.form_name_hint')}</p>
+            <Input id={nameId} aria-label={i18nT('pages.overview.promptsTab.form_name')} aria-describedby={nameHintId} value={data.name} onChange={e => set({ name: e.target.value })} placeholder={i18nT('pages.overview.promptsTab.form_name_placeholder')} />
+            {/* The hint is the field's DESCRIPTION, and it now carries the one
+                fact only the server used to know: the name the file gets. So it
+                is associated (aria-describedby) rather than merely adjacent, and
+                announced on change (aria-live) — a sighted user watches the stem
+                update as they type, and without this a screen-reader user would
+                hear the generic rule once on focus and never learn that the name
+                was rewritten, or that Create is disabled because nothing of it
+                survived. `polite` waits for a pause, so it does not speak on
+                every keystroke. */}
+            <p
+              id={nameHintId}
+              aria-live="polite"
+              className={`text-[11px] mt-1 ${typed && !stem ? 'text-danger' : 'text-muted'}`}
+            >
+              {!typed
+                ? i18nT('pages.overview.promptsTab.form_name_hint')
+                : stem
+                  ? i18nT('pages.overview.promptsTab.form_name_preview', { filename: `${stem}.md` })
+                  : i18nT('pages.overview.promptsTab.invalid_name_hint')}
+            </p>
           </div>
           <div>
             <span className="block text-[12px] text-muted mb-1">{i18nT('pages.overview.promptsTab.form_scope')}</span>

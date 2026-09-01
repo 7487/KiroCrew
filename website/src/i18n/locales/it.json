@@ -10926,6 +10926,8 @@
         "form_description_placeholder": "Una riga mostrata nell’elenco dei prompt",
         "form_name": "Nome",
         "form_name_hint": "Minuscole, cifre e trattini. Salvato come <name>.md.",
+        "form_name_preview": "Minuscole, cifre e trattini. Salvato come {{filename}}.",
+        "invalid_name_hint": "Il nome del file di un prompt può contenere solo minuscole, cifre e trattini, e questo nome non ne ha nessuno. Aggiungi almeno una lettera dalla a alla z, o una cifra.",
         "form_name_placeholder": "mio-nome-prompt",
         "form_scope": "Ambito",
         "invoke_in_chat": "Invoca nella chat:",
