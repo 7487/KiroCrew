@@ -268,6 +268,7 @@ class TestHooksConfigFromDict:
             "disabled_ids": [],
             "disable_all": False,
             "user_added": [],
+            "allow_unverified_shell": False,
         }
 
     def test_blank_user_patterns_are_dropped(self):
@@ -290,6 +291,7 @@ class TestHooksConfigFromDict:
             "disabled_ids": [],
             "disable_all": False,
             "user_added": [],
+            "allow_unverified_shell": False,
         }
 
 

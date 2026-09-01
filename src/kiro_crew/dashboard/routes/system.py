@@ -97,6 +97,10 @@ def register(app: web.Application) -> None:
         "/api/security/denied-commands/disable-all", handlers.api_denied_commands_disable_all
     )
     app.router.add_patch(
+        "/api/security/denied-commands/allow-unverified-shell",
+        handlers.api_denied_commands_allow_unverified_shell,
+    )
+    app.router.add_patch(
         "/api/security/denied-commands/builtins/{id}", handlers.api_denied_command_builtin_toggle
     )
     app.router.add_post("/api/security/denied-commands/user", handlers.api_denied_command_user_add)

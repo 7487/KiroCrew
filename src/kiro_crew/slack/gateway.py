@@ -730,6 +730,13 @@ def _build_heartbeat_hooks(user_hooks: HookManager) -> HookManager:
         denied_commands_disabled_ids=list(user_cfg.denied_commands_disabled_ids),
         denied_commands_disable_all=user_cfg.denied_commands_disable_all,
         denied_commands_user_added=list(user_cfg.denied_commands_user_added),
+        # ``denied_commands_allow_unverified_shell`` is deliberately NOT carried.
+        # Unlike the three fields above it WIDENS what runs — it suppresses the
+        # deny-by-default refusal for a shell command the gate could not parse.
+        # A heartbeat session is unattended and already narrowed to
+        # ``HEARTBEAT_SAFE_TOOLS``; letting an operator convenience toggle admit
+        # unverifiable commands there is the one direction this scoping exists to
+        # prevent.  Omitting it leaves heartbeat strictly fail-closed.
     )
     return HookManager(scoped)
 

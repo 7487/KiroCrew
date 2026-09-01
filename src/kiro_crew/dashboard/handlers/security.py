@@ -197,6 +197,12 @@ def _denied_state(data: dict) -> dict:
         "disable_all": _coerce_bool(denied.get("disable_all", False), default=False),
         "disabled_ids": [i for i in disabled_ids if isinstance(i, str) and i],
         "user_added": list(user_added) if isinstance(user_added, list) else [],
+        # This function REBUILDS the object rather than passing it through, so an
+        # unlisted key is invisible to every consumer downstream. A new key must
+        # be added here or it silently does nothing.
+        "allow_unverified_shell": _coerce_bool(
+            denied.get("allow_unverified_shell", False), default=False
+        ),
     }
 
 
@@ -258,6 +264,7 @@ def build_denied_commands_snapshot() -> dict:
     """
     from kiro_crew.security import (
         builtin_denied_rules,
+        edition_denied_rules,
         floor_enforced_builtin_command_ids,
         pinned_builtin_command_ids_for_snapshot,
     )
@@ -273,10 +280,28 @@ def build_denied_commands_snapshot() -> dict:
     floor_ids = floor_enforced_builtin_command_ids()
 
     builtins: list[dict] = []
-    for rule in builtin_denied_rules():
+    # Edition-contributed rules are listed in the SAME array so the panel's
+    # category grouping, counts and toggles work with no frontend change. They
+    # carry source="edition" so a consumer can tell them apart, and they are
+    # never pinned or floor-enforced: a governance pin resolves a pattern to a
+    # rule id against the static catalog only, so a pin cannot name one.
+    catalog: list[tuple[dict, bool]] = [(r, False) for r in builtin_denied_rules()]
+    catalog += [
+        (
+            {
+                "id": r.id,
+                "pattern": r.pattern,
+                "category": r.category,
+                "description": r.description,
+            },
+            True,
+        )
+        for r in edition_denied_rules()
+    ]
+    for rule, from_edition in catalog:
         rid = rule["id"]
-        is_pinned = rid in pinned
-        is_floor = rid in floor_ids
+        is_pinned = (not from_edition) and rid in pinned
+        is_floor = (not from_edition) and rid in floor_ids
         # Floor-enforced rules render forced-on even when the id somehow sits in
         # disabled_ids (state persisted before the toggle rejected it): the floor
         # consults no opt-out state, so honesty requires enabled=true.
@@ -299,6 +324,7 @@ def build_denied_commands_snapshot() -> dict:
                 "enabled": enabled,
                 "pinned": is_pinned,
                 "lock_reason": lock_reason,
+                "source": "edition" if from_edition else "builtin",
             }
         )
 
@@ -332,6 +358,7 @@ def build_denied_commands_snapshot() -> dict:
         "disable_all": disable_all,
         "effective_count": effective_count,
         "governance_locked": bool(pinned),
+        "allow_unverified_shell": state["allow_unverified_shell"],
     }
 
 
@@ -429,6 +456,12 @@ def _reload_live_hooks(request: web.Request, denied_state: dict) -> None:
                     denied_commands_disabled_ids=parsed.denied_commands_disabled_ids,
                     denied_commands_disable_all=parsed.denied_commands_disable_all,
                     denied_commands_user_added=parsed.denied_commands_user_added,
+                    # A field missing here takes effect only after a gateway
+                    # restart — the worst failure mode for a switch the operator
+                    # just flipped, so every denied_commands field must be listed.
+                    denied_commands_allow_unverified_shell=(
+                        parsed.denied_commands_allow_unverified_shell
+                    ),
                 )
             )
         else:
@@ -473,7 +506,11 @@ async def api_denied_commands_list(request: web.Request) -> web.Response:
 
 async def api_denied_command_builtin_toggle(request: web.Request) -> web.Response:
     """PATCH /api/security/denied-commands/builtins/{id} — {enabled: bool}."""
-    from kiro_crew.security import builtin_denied_rules, floor_enforced_builtin_command_ids
+    from kiro_crew.security import (
+        builtin_denied_rules,
+        edition_denied_rules,
+        floor_enforced_builtin_command_ids,
+    )
 
     op = "security.denied_commands.builtin_toggle"
     rule_id = request.match_info["id"]
@@ -491,7 +528,10 @@ async def api_denied_command_builtin_toggle(request: web.Request) -> web.Respons
         _audit(request, operation=op, outcome="denied", resources=f"{rule_id}=bad_type")
         return web.json_response({"error": "enabled must be a boolean"}, status=400)
 
-    if rule_id not in {r["id"] for r in builtin_denied_rules()}:
+    # Union the edition-contributed ids: a rule listed in the panel must be
+    # toggleable there, or the UI offers a switch the API 404s.
+    known_ids = {r["id"] for r in builtin_denied_rules()} | {r.id for r in edition_denied_rules()}
+    if rule_id not in known_ids:
         _audit(request, operation=op, outcome="denied", resources=f"{rule_id}=unknown")
         return web.json_response({"error": "unknown builtin rule"}, status=404)
 
@@ -556,6 +596,46 @@ async def api_denied_commands_disable_all(request: web.Request) -> web.Response:
 
     def _mutate(denied: dict) -> None:
         denied["disable_all"] = value
+
+    err = await _apply_mutation(request, op, _mutate)
+    if err is not None:
+        return err
+    _audit(request, operation=op, outcome="ok", resources=str(value))
+    return await _snapshot_response()
+
+
+# ── unverified-shell override ──
+
+
+async def api_denied_commands_allow_unverified_shell(request: web.Request) -> web.Response:
+    """PATCH /api/security/denied-commands/allow-unverified-shell — {value: bool}.
+
+    Suppresses ONE refusal: the deny-by-default on a shell tool call whose command
+    string could not be recovered from the provider payload. Deliberately NOT a
+    switch for the truncated-argument-walk refusal, which would mean trusting a
+    partial sensitive-path scan as a complete one.
+
+    Lives on the keystone opt-out file, so the agent can neither read nor write it;
+    every flip is audited here and every SUPPRESSION is audited at the gate.
+    """
+    op = "security.denied_commands.allow_unverified_shell"
+    try:
+        body = await request.json()
+    except Exception:
+        _audit(request, operation=op, outcome="denied", resources="invalid_json")
+        return web.json_response({"error": "invalid JSON", "code": "invalid_json"}, status=400)
+
+    if not isinstance(body, dict):
+        body = {}
+    value = body.get("value")
+    if not isinstance(value, bool):
+        _audit(request, operation=op, outcome="denied", resources="bad_type")
+        return web.json_response(
+            {"error": "value must be a boolean", "code": "bad_type"}, status=400
+        )
+
+    def _mutate(denied: dict) -> None:
+        denied["allow_unverified_shell"] = value
 
     err = await _apply_mutation(request, op, _mutate)
     if err is not None:

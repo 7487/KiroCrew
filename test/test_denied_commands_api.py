@@ -30,6 +30,7 @@ from kiro_crew.dashboard.handlers.security import (
     api_denied_command_user_add,
     api_denied_command_user_delete,
     api_denied_command_user_toggle,
+    api_denied_commands_allow_unverified_shell,
     api_denied_commands_disable_all,
     api_denied_commands_list,
     build_denied_commands_snapshot,
@@ -78,6 +79,10 @@ def _make_app() -> web.Application:
     app.router.add_get("/api/security/denied-commands", api_denied_commands_list)
     app.router.add_patch(
         "/api/security/denied-commands/disable-all", api_denied_commands_disable_all
+    )
+    app.router.add_patch(
+        "/api/security/denied-commands/allow-unverified-shell",
+        api_denied_commands_allow_unverified_shell,
     )
     app.router.add_patch(
         "/api/security/denied-commands/builtins/{id}", api_denied_command_builtin_toggle
@@ -134,6 +139,8 @@ def test_snapshot_shape_and_defaults(home: Path):
         "disable_all",
         "effective_count",
         "governance_locked",
+        # Operator override for the unrecoverable-shell deny-by-default refusal.
+        "allow_unverified_shell",
     }
     assert snap["disable_all"] is False
     assert snap["governance_locked"] is False
@@ -147,10 +154,14 @@ def test_snapshot_shape_and_defaults(home: Path):
         "enabled",
         "pinned",
         "lock_reason",
+        # Discriminates a shipped rule from one contributed through the
+        # ``denied_rules`` seam; see test_denied_rule_seam.py.
+        "source",
     }
     assert b["enabled"] is True
     assert b["pinned"] is False
     assert b["lock_reason"] is None
+    assert b["source"] == "builtin"
     assert snap["effective_count"] == _CATALOG_N
 
 
@@ -218,12 +229,17 @@ def test_snapshot_disable_all_string_false_is_not_truthy(home: Path, config_file
 
 
 def test_snapshot_marks_floor_rules_locked_and_forced_on(home: Path, config_file: Path):
-    # Every git-publish rule is floor-enforced: forced enabled and lock-flagged,
-    # even when its id was persisted into disabled_ids by an older build.
+    # Only the git-publish rules whose coverage is the UNGATED anti-obfuscation
+    # branch are floor-enforced: forced enabled and lock-flagged, even when the id
+    # was persisted into disabled_ids by an older build. The rest of the category
+    # is gated on the per-rule enable state and renders freely toggleable.
+    from kiro_crew.security import floor_enforced_builtin_command_ids
+
     rid = _a_floor_id()
     _seed(config_file, {"disabled_ids": [rid]})
     snap = build_denied_commands_snapshot()
-    floor_rules = [b for b in snap["builtins"] if b["category"] == "git-publish"]
+    floor_ids = floor_enforced_builtin_command_ids()
+    floor_rules = [b for b in snap["builtins"] if b["id"] in floor_ids]
     assert len(floor_rules) == _floor_n() > 0
     for b in floor_rules:
         assert b["enabled"] is True
@@ -247,17 +263,22 @@ def test_floor_lock_reason_wins_over_policy(home: Path):
 
 
 def test_floor_ids_are_derived_from_the_category():
-    # Guard: the accessor derives from the catalog category, so a newly added
-    # git-publish rule is locked without a code change. A hand-maintained id
-    # list would fail this the moment the catalog gains one.
+    # Guard: the accessor reports ONLY the rules whose coverage is an ungated
+    # branch of the floor. The rest of the git-publish category is now gated on
+    # the per-rule enable state, so reporting the whole category would lock rows
+    # whose toggle actually works — the inverse of the no-op this accessor exists
+    # to prevent. Brace expansion is the ungated one: it is caught by
+    # ``_AMBIGUOUS_EXPANSION_RE`` inside the unverifiable-glue check, which no
+    # opt-out may reach.
     from kiro_crew.security import (
         BUILTIN_DENIED_RULES,
         floor_enforced_builtin_command_ids,
     )
 
-    expected = {r.id for r in BUILTIN_DENIED_RULES if r.category == "git-publish"}
-    assert expected, "catalog must carry git-publish rules"
-    assert floor_enforced_builtin_command_ids() == expected
+    floor = floor_enforced_builtin_command_ids()
+    assert floor == {"git-publish-push-brace-expansion-refspec"}
+    git_publish = {r.id for r in BUILTIN_DENIED_RULES if r.category == "git-publish"}
+    assert floor < git_publish, "floor ids must be a strict subset of the category"
 
 
 # ── GET ──
@@ -402,6 +423,52 @@ async def test_disable_all_bad_body(home: Path, mock_sel):
     async with _client() as client:
         resp = await client.patch("/api/security/denied-commands/disable-all", json={"value": 1})
         assert resp.status == 400
+
+
+# ── allow-unverified-shell ──
+
+
+@pytest.mark.asyncio
+async def test_allow_unverified_shell_sets_flag(config_file: Path, mock_sel):
+    """The flag must land in the KEYSTONE denied-commands state, not config.json.
+
+    That placement is the whole security argument for this switch: ``config.json``
+    is agent-writable through the shell, so a flag there would let the agent
+    switch off its own deny-by-default guard.
+    """
+    async with _client() as client:
+        resp = await client.patch(
+            "/api/security/denied-commands/allow-unverified-shell", json={"value": True}
+        )
+        assert resp.status == 200
+        body = await resp.json()
+        assert body["allow_unverified_shell"] is True
+    assert _read_hooks(config_file)["allow_unverified_shell"] is True
+    assert mock_sel.log_api_access.call_args.kwargs["outcome"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_allow_unverified_shell_rejects_a_non_bool(home: Path, mock_sel):
+    """A truthy non-bool must be REFUSED, not coerced — coercion would let a
+    stray ``1`` in a scripted call silently disable a refusal."""
+    async with _client() as client:
+        resp = await client.patch(
+            "/api/security/denied-commands/allow-unverified-shell", json={"value": 1}
+        )
+        assert resp.status == 400
+
+
+@pytest.mark.asyncio
+async def test_allow_unverified_shell_round_trips_off(config_file: Path, mock_sel):
+    async with _client() as client:
+        await client.patch(
+            "/api/security/denied-commands/allow-unverified-shell", json={"value": True}
+        )
+        resp = await client.patch(
+            "/api/security/denied-commands/allow-unverified-shell", json={"value": False}
+        )
+        assert resp.status == 200
+    assert _read_hooks(config_file)["allow_unverified_shell"] is False
 
 
 # ── user add ──

