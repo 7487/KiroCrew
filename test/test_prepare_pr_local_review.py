@@ -276,18 +276,30 @@ def test_gpt_prompt_is_lifted_verbatim_not_paraphrased():
 def test_gpt_two_passes_and_blocking_budget_come_from_the_workflow():
     text = _gpt_text()
     scalars = local_review.block_scalars(text)
-    block = local_review._run_block_with(scalars, "DISCOVERY PASS", "gpt")
     import tempfile
 
+    # The passes run as separate STEPS so each gets its own Bedrock session, so
+    # each instruction is located in the block that carries it. The falsification
+    # lookup goes through the splice-aware locator because that instruction lives
+    # in a shared prompt file its step `cat`s in.
+    discovery_block = local_review._run_block_with(scalars, "DISCOVERY PASS", "gpt")
     with tempfile.TemporaryDirectory(prefix="gpt-pass-stage-") as stage_dir:
         _stage_gpt_prompts(text, stage_dir)
-        literals = local_review.prompt_segments(block, stage_dir)
-    discovery = local_review.literals_between(
-        literals, "DISCOVERY PASS", "DISCOVERY PASS", "discovery"
-    )
-    falsification = local_review.literals_between(
-        literals, "FALSIFICATION PASS", "UNTRUSTED EVIDENCE", "falsification"
-    )
+        pass_block = local_review._run_block_with_instruction(
+            scalars, "FALSIFICATION PASS", "gpt", stage_dir
+        )
+        discovery = local_review.literals_between(
+            local_review.prompt_segments(discovery_block, stage_dir),
+            "DISCOVERY PASS",
+            "DISCOVERY PASS",
+            "discovery",
+        )
+        falsification = local_review.literals_between(
+            local_review.prompt_segments(pass_block, stage_dir),
+            "FALSIFICATION PASS",
+            "UNTRUSTED EVIDENCE",
+            "falsification",
+        )
     assert len(discovery) == 1
     assert "candidate generation" in discovery[0]
     assert len(falsification) >= 2
@@ -1368,11 +1380,15 @@ def test_every_staged_prompt_file_is_spliced_exactly_once_in_loop_order():
         block,
         flags=re.M,
     )
-    pass_block = local_review._run_block_with(scalars, "DISCOVERY PASS", "gpt")
+    # A bare `cat` splice lives in whichever review step consumes it, and the two
+    # passes are separate steps (each needs its own Bedrock session), so scan
+    # every `run:` block instead of the one the discovery instruction is in.
     pass_spliced = [
         m.group("src").rsplit("/", 1)[-1]
-        for m in map(local_review._CAT_BARE_RE.match, pass_block.splitlines())
-        if m is not None
+        for scalar in scalars
+        if scalar.key == "run"
+        for m in map(local_review._CAT_BARE_RE.match, scalar.text.splitlines())
+        if m is not None and m.group("src").startswith(".review-prompts-gpt/")
     ]
     assert spliced == [name for name in staged if name not in pass_spliced]
     assert len(set(spliced)) == len(spliced), "a document splice repeats"
